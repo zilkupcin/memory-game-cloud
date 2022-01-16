@@ -1,14 +1,21 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
+const {
+  generateEmptyGrid,
+  generateSolution,
+  buildGameTemplate,
+} = require("./util");
 
 admin.initializeApp();
 
 exports.restartGame = functions.https.onCall(async (data, context) => {
-  // Find the game
+  // Find the game with given ID
   let gameRef = await admin.firestore().collection("game").doc(data.gameId);
 
+  // Get a snapshot of data for later use
   const gameSnap = await gameRef.get();
 
+  // Check if the function caller is the host of the game
   if (gameSnap.get("host") != context.auth.uid) {
     throw new functions.https.HttpsError(
       "not-host",
@@ -16,157 +23,50 @@ exports.restartGame = functions.https.onCall(async (data, context) => {
     );
   }
 
+  // Get some game related data
   const size = gameSnap.get("grid").length;
   const gameType = gameSnap.get("gameType");
   const maxPlayers = gameSnap.get("maxPlayers");
   const gameGrid = generateEmptyGrid(Math.sqrt(size));
 
+  // Create a new game from a template
   const newGameRef = await admin
     .firestore()
     .collection("game")
-    .add(buildGameTemplate(maxPlayers, gameType, gameGrid));
+    .add(buildGameTemplate(maxPlayers, gameType, gameGrid, context.auth.uid));
 
+  // Generate a solution for a new game
   await admin
     .firestore()
     .collection("solution")
     .add({
-      game: gameRef.id,
-      grid: generateSolution(Math.sqrt(size), gameType, gameGrid),
+      game: newGameRef.id,
+      grid: generateSolution(gameGrid, Math.sqrt(size), gameType),
     });
 
+  // Finish the old game and set a new game ID
+  // so users are redirected to a new game
   await gameRef.set(
     { nextGame: newGameRef.id, finished: true },
     { merge: true }
   );
 
   return true;
-
-  function generateNumber(numbers) {
-    const newNumber = Math.floor(Math.random() * 100);
-    if (numbers.includes(newNumber)) {
-      return generateNumber(numbers);
-    } else {
-      return newNumber;
-    }
-  }
-
-  function selectIcon(iconSet) {
-    const randomIndex = Math.floor(Math.random() * iconSet.length);
-    const randomIcon = iconSet[randomIndex];
-    iconSet.splice(randomIndex, 1);
-    return randomIcon;
-  }
-
-  function buildGameTemplate(maxPlayers, gameType, gameGrid) {
-    return {
-      finished: false,
-      started: false,
-      host: context.auth.uid,
-      maxPlayers,
-      grid: gameGrid,
-      gameType: gameType,
-      players: [
-        {
-          id: context.auth.uid,
-          name: "Player 1",
-          score: 0,
-          active: true,
-          isReady: false,
-        },
-      ],
-      currentTurn: {
-        player: context.auth.uid,
-        selection: [],
-      },
-      createdAt: new Date(),
-    };
-  }
-
-  function generateEmptyGrid(size) {
-    let grid = [];
-
-    for (let i = 0; i < size * size; i++) {
-      grid.push(-1);
-    }
-
-    return grid;
-  }
-
-  function generateSolution(size, gameType, gameGrid) {
-    // Unique icons
-    const iconSet = [
-      "football-ball",
-      "mountain",
-      "tree",
-      "wind",
-      "tractor",
-      "space-shuttle",
-      "meteor",
-      "rocket",
-      "bomb",
-      "cloud",
-      "feather",
-      "bone",
-      "fish",
-      "ice-cream",
-      "pizza-slice",
-      "stroopwafel",
-      "plane",
-      "wine-glass-alt",
-    ];
-
-    // Unique number set equal to the number of grid's columns
-    let numberSet = [];
-
-    // Make a copy of the empty grid
-    let solution = [...gameGrid];
-
-    for (let i = 0; i < (size * size) / 2; i++) {
-      // Unique element of the solution array
-      let uniqueElement;
-
-      // Select a random element depending on the type of the game
-      if (gameType === "numbers") {
-        // Generate a unique random number
-        uniqueElement = generateNumber(numberSet);
-        // Keep track of the number so we know only add unique ones
-        numberSet.push(uniqueElement);
-      } else if (gameType === "icons") {
-        // Select a random icon from the iconSet
-        uniqueElement = selectIcon(iconSet);
-      }
-
-      // Put the generated element in 2 random places of the solution array
-      for (let b = 0; b < 2; b++) {
-        // Store the indexes of all remaining empty elements
-        const emptyGridElements = [];
-
-        // Check which solution elements are still empty
-        solution.forEach((item, index) => {
-          if (item === -1) {
-            emptyGridElements.push(index);
-          }
-        });
-
-        const randIndex = Math.floor(Math.random() * emptyGridElements.length);
-
-        solution[emptyGridElements[randIndex]] = uniqueElement;
-      }
-    }
-
-    return solution;
-  }
 });
 
 exports.setReady = functions.https.onCall(async (data, context) => {
+  // Get the current game by ID
   let gameRef = await admin.firestore().collection("game").doc(data.gameId);
 
+  // Get a snapshot of data for later use
   const gameSnap = await gameRef.get();
 
+  // Get some game data
   const players = gameSnap.get("players");
   let started = gameSnap.get("started");
   const thisPlayer = players.find((player) => player.id === context.auth.uid);
 
+  // Perform validation
   if (gameSnap.get("finished")) {
     throw new functions.https.HttpsError(
       "game-finished",
@@ -184,6 +84,7 @@ exports.setReady = functions.https.onCall(async (data, context) => {
     );
   }
 
+  // Toggle player's ready state
   thisPlayer.isReady = !thisPlayer.isReady;
 
   // Check if there are any players that aren't ready
@@ -194,6 +95,7 @@ exports.setReady = functions.https.onCall(async (data, context) => {
     started = true;
   }
 
+  // Update the game data
   await gameRef.set({ players, started }, { merge: true });
   return true;
 });
@@ -205,147 +107,38 @@ exports.createGame = functions.https.onCall(async (data, context) => {
   const validSizes = [4, 6];
   const validGameTypes = ["icons", "numbers"];
 
+  // Perform validation
   if (typeof maxPlayers !== "number" || typeof size !== "number") {
     throw new functions.https.HttpsError(
       "invalid-argument",
       "One or more arguments is of invalid data type"
     );
-  }
-
-  if (!validSizes.includes(size) || maxPlayers > 4 || maxPlayers < 1) {
+  } else if (!validSizes.includes(size) || maxPlayers > 4 || maxPlayers < 1) {
     throw new functions.https.HttpsError("One or more parameters is invalid");
-  }
-
-  if (!validGameTypes.includes(gameType)) {
+  } else if (!validGameTypes.includes(gameType)) {
     throw new functions.https.HttpsError(
       "invalid-game-type",
       "Provided game type is invalid"
     );
   }
 
-  const gameGrid = generateEmptyGrid();
+  // Generate a new, empty grid
+  const gameGrid = generateEmptyGrid(size);
 
+  // Create a new game document
   const gameRef = await admin
     .firestore()
     .collection("game")
+    .add(buildGameTemplate(maxPlayers, gameType, gameGrid, context.auth.uid));
+
+  // Create a new solution document
+  await admin
+    .firestore()
+    .collection("solution")
     .add({
-      finished: false,
-      started: false,
-      host: context.auth.uid,
-      maxPlayers,
-      grid: gameGrid,
-      gameType: gameType,
-      players: [
-        {
-          id: context.auth.uid,
-          name: "Player 1",
-          score: 0,
-          active: true,
-          isReady: false,
-        },
-      ],
-      currentTurn: {
-        player: context.auth.uid,
-        selection: [],
-      },
-      createdAt: new Date(),
+      game: gameRef.id,
+      grid: generateSolution(gameGrid, size, gameType),
     });
-
-  await admin.firestore().collection("solution").add({
-    game: gameRef.id,
-    grid: generateSolution(),
-  });
-
-  function generateEmptyGrid() {
-    let grid = [];
-
-    for (let i = 0; i < size * size; i++) {
-      grid.push(-1);
-    }
-
-    return grid;
-  }
-
-  function generateSolution() {
-    // Unique icons
-    const iconSet = [
-      "football-ball",
-      "mountain",
-      "tree",
-      "wind",
-      "tractor",
-      "space-shuttle",
-      "meteor",
-      "rocket",
-      "bomb",
-      "cloud",
-      "feather",
-      "bone",
-      "fish",
-      "ice-cream",
-      "pizza-slice",
-      "stroopwafel",
-      "plane",
-      "wine-glass-alt",
-    ];
-
-    // Unique number set equal to the number of grid's columns
-    let numberSet = [];
-
-    // Make a copy of the empty grid
-    let solution = [...gameGrid];
-
-    for (let i = 0; i < (size * size) / 2; i++) {
-      // Unique element of the solution array
-      let uniqueElement;
-
-      // Select a random element depending on the type of the game
-      if (gameType === "numbers") {
-        // Generate a unique random number
-        uniqueElement = generateNumber(numberSet);
-        // Keep track of the number so we know only add unique ones
-        numberSet.push(uniqueElement);
-      } else if (gameType === "icons") {
-        // Select a random icon from the iconSet
-        uniqueElement = selectIcon(iconSet);
-      }
-
-      // Put the generated element in 2 random places of the solution array
-      for (let b = 0; b < 2; b++) {
-        // Store the indexes of all remaining empty elements
-        const emptyGridElements = [];
-
-        // Check which solution elements are still empty
-        solution.forEach((item, index) => {
-          if (item === -1) {
-            emptyGridElements.push(index);
-          }
-        });
-
-        const randIndex = Math.floor(Math.random() * emptyGridElements.length);
-
-        solution[emptyGridElements[randIndex]] = uniqueElement;
-      }
-    }
-
-    return solution;
-  }
-
-  function generateNumber(numbers) {
-    const newNumber = Math.floor(Math.random() * 100);
-    if (numbers.includes(newNumber)) {
-      return generateNumber(numbers);
-    } else {
-      return newNumber;
-    }
-  }
-
-  function selectIcon(iconSet) {
-    const randomIndex = Math.floor(Math.random() * iconSet.length);
-    const randomIcon = iconSet[randomIndex];
-    iconSet.splice(randomIndex, 1);
-    return randomIcon;
-  }
 
   return gameRef.id;
 });
@@ -357,47 +150,46 @@ exports.guess = functions.https.onCall(async (data, context) => {
     .collection("game")
     .doc(data.gameId);
 
+  // Get the game's snapshot for later use
   const currentGameSnap = await currentGameRef.get();
 
+  // Perform validation
   if (!currentGameSnap.get("players")) {
     throw new functions.https.HttpsError(
       "game-does-not-exist",
       "A game with this ID does not exists"
     );
-  }
-
-  if (!currentGameSnap.get("started")) {
+  } else if (!currentGameSnap.get("started")) {
     throw new functions.https.HttpsError(
       "game-started",
       "The game has already started"
     );
-  }
-
-  if (currentGameSnap.get("currentTurn").player !== context.auth.uid) {
+  } else if (currentGameSnap.get("currentTurn").player !== context.auth.uid) {
     throw new functions.https.HttpsError(
       "not-your-turn",
       "It's not your turn yet"
     );
-  }
-
-  if (currentGameSnap.get("grid")[data.index] !== -1) {
+  } else if (currentGameSnap.get("grid")[data.index] !== -1) {
     throw new functions.https.HttpsError(
       "not-empty",
       "Please select a new bubble"
     );
   }
 
+  // Get all solutions for the game ID
   const solutionRefs = await admin
     .firestore()
     .collection("solution")
     .where("game", "==", data.gameId)
     .get();
 
+  // Store the references in an array
   const foundRefs = [];
   solutionRefs.forEach((ref) => {
     foundRefs.push(ref);
   });
 
+  // The solution object is always the 1st one in the array
   const solution = foundRefs[0];
 
   const solutionGrid = solution.get("grid");
@@ -408,7 +200,9 @@ exports.guess = functions.https.onCall(async (data, context) => {
   const grid = currentGameSnap.get("grid");
   let finished = currentGameSnap.get("finished");
 
+  // Check how many guesses the player made during this turn
   if (currentTurn.selection.length < 2) {
+    // Check if the player selected a non-empty bubble
     if (
       currentTurn.player === context.auth.uid &&
       currentTurn.selection[0] === data.index
@@ -419,13 +213,17 @@ exports.guess = functions.https.onCall(async (data, context) => {
       );
     }
 
+    // Track current selection
     currentTurn.selection.push(data.index);
 
+    // Check if this was the player's 2nd (final) selection of the turn
     if (currentTurn.selection.length === 2) {
+      // Find the player's object
       const currentPlayer = players.find((player) => {
         return player.id === context.auth.uid;
       });
 
+      // Check if player's guess is correct
       if (
         solutionGrid[currentTurn.selection[0]] ===
         solutionGrid[currentTurn.selection[1]]
@@ -438,8 +236,7 @@ exports.guess = functions.https.onCall(async (data, context) => {
         grid[currentTurn.selection[1]] = solutionGrid[currentTurn.selection[1]];
       }
 
-      // End player's turn here?
-
+      // If there's more than one player in the game, determine which player's turn is next
       if (players.length > 1) {
         const currentPlayerIndex = players.indexOf(currentPlayer);
 
@@ -453,6 +250,7 @@ exports.guess = functions.https.onCall(async (data, context) => {
           });
         }
 
+        // If there are no more active players, finish the game
         if (!nextPlayer) {
           finished = true;
         } else {
@@ -461,14 +259,17 @@ exports.guess = functions.https.onCall(async (data, context) => {
       }
     }
   } else {
+    // Reset the selection and push the new selection index
     currentTurn.selection = [];
     currentTurn.selection.push(data.index);
   }
 
+  // Check if there are no more empty grid elements
   if (!grid.find((gridElm) => gridElm === -1)) {
     finished = true;
   }
 
+  // Update game data
   await currentGameRef.set(
     { currentTurn, players, grid, finished },
     { merge: true }
@@ -512,6 +313,7 @@ exports.join = functions.https.onCall(async (data, context) => {
 
   const newGameSnap = await newGameRef.get();
 
+  // Perform validation
   if (newGameSnap.get("players").length + 1 > newGameSnap.get("maxPlayers")) {
     throw new functions.https.HttpsError(
       "max-players",
@@ -529,6 +331,7 @@ exports.join = functions.https.onCall(async (data, context) => {
     );
   }
 
+  // Set initial data for the new player
   const players = newGameSnap.get("players");
   players.push({
     id: context.auth.uid,
@@ -551,7 +354,7 @@ exports.leaveGame = functions.https.onCall(async (data, context) => {
     .where("finished", "==", false)
     .get();
 
-  // Loop through each game and update set player to inactive in these games
+  // Loop through each game and update player to inactive in these games
   gameSnapshots.forEach(async (doc) => {
     const players = doc.get("players");
 
@@ -559,41 +362,52 @@ exports.leaveGame = functions.https.onCall(async (data, context) => {
       return player.id === context.auth.uid && player.active === true;
     });
 
-    if (activePlayer) {
-      activePlayer.active = false;
+    if (!activePlayer) return;
 
-      const activeGameRef = await admin
-        .firestore()
-        .collection("game")
-        .doc(doc.id);
+    const activeGameRef = await admin
+      .firestore()
+      .collection("game")
+      .doc(doc.id);
 
-      const activePlayers = players.filter((player) => player.active);
-
-      let finished = false;
-      let currentTurn = doc.get("currentTurn");
-
-      if (players.length > 1) {
-        finished = activePlayers.length > 1 ? false : true;
-      } else {
-        finished = true;
-      }
-
-      // Set next player
-      if (players.length > 1 && !finished) {
-        const currentPlayerIndex = activePlayers.indexOf(activePlayer);
-        const nextPlayerIndex =
-          currentPlayerIndex + 1 < activePlayers.length
-            ? currentPlayerIndex + 1
-            : 0;
-        currentTurn.player = activePlayers[nextPlayerIndex].id;
-
-        currentPlayer.selection = [];
-      }
-
-      await activeGameRef.set(
-        { players, finished, currentTurn },
-        { merge: true }
-      );
+    // If the game hasn't started yet, just remove the player
+    // so other players can join
+    if (!doc.get("started")) {
+      players.splice(players.indexOf(activePlayer), 1);
+      await activeGameRef.set({ players }, { merge: true });
+      return;
     }
+
+    activePlayer.active = false;
+
+    const activePlayers = players.filter((player) => player.active);
+
+    let finished = false;
+    let currentTurn = doc.get("currentTurn");
+
+    if (players.length > 1) {
+      finished = activePlayers.length > 1 ? false : true;
+    } else {
+      finished = true;
+    }
+
+    // Find and set the next player
+    if (players.length > 1 && !finished) {
+      const currentPlayerIndex = activePlayers.indexOf(activePlayer);
+
+      const nextPlayerIndex =
+        currentPlayerIndex + 1 < activePlayers.length
+          ? currentPlayerIndex + 1
+          : 0;
+
+      currentTurn.player = activePlayers[nextPlayerIndex].id;
+
+      // Reset the selection for the next player
+      currentPlayer.selection = [];
+    }
+
+    await activeGameRef.set(
+      { players, finished, currentTurn },
+      { merge: true }
+    );
   });
 });
